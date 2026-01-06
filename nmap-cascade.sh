@@ -13,7 +13,7 @@ BOLD='\033[1m'
 # Banner
 echo -e "${CYAN}${BOLD}"
 echo "╔═══════════════════════════════════════════════════════╗"
-echo "║         3-PHASE NMAP SCANNER v1.0                     ║"
+echo "║         3-PHASE NMAP SCANNER v1.1                     ║"
 echo "║         Advanced Port Discovery & Analysis            ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -99,15 +99,29 @@ fi
 echo -e "${GREEN}[✓] Phase 1 complete!${NC}"
 echo -e "${GREEN}[✓] Output: ${PHASE1_OUTPUT}.*${NC}\n"
 
-# Extract open ports
-OPEN_PORTS=$(grep "^[0-9]" "${PHASE1_OUTPUT}.gnmap" | grep "/open/" | cut -d' ' -f2 | grep -o "[0-9]*" | sort -nu | tr '\n' ',' | sed 's/,$//')
+# Extract open ports - FIXED VERSION
+# Try gnmap format first (most reliable)
+OPEN_PORTS=$(grep "Ports:" "${PHASE1_OUTPUT}.gnmap" 2>/dev/null | grep -oP '\d+/open' | cut -d'/' -f1 | sort -nu | tr '\n' ',' | sed 's/,$//')
+
+# Fallback to normal output if gnmap parsing fails
+if [ -z "$OPEN_PORTS" ]; then
+    echo -e "${YELLOW}[*] Trying alternative port extraction method...${NC}"
+    OPEN_PORTS=$(awk '/^[0-9]+\/tcp.*open/ {print $1}' "${PHASE1_OUTPUT}.txt" | cut -d'/' -f1 | sort -nu | tr '\n' ',' | sed 's/,$//')
+fi
 
 if [ -z "$OPEN_PORTS" ]; then
     echo -e "${RED}[!] No open ports found! Exiting.${NC}"
+    echo -e "${YELLOW}[*] Check the output files for details:${NC}"
+    echo -e "    ${PHASE1_OUTPUT}.txt"
+    echo -e "    ${PHASE1_OUTPUT}.gnmap"
     exit 1
 fi
 
-echo -e "${GREEN}[✓] Open ports discovered: ${BOLD}$OPEN_PORTS${NC}\n"
+# Count ports
+PORT_COUNT=$(echo "$OPEN_PORTS" | tr ',' '\n' | wc -l)
+
+echo -e "${GREEN}[✓] ${BOLD}${PORT_COUNT}${NC}${GREEN} open ports discovered:${NC}"
+echo -e "${BOLD}$OPEN_PORTS${NC}\n"
 sleep 2
 
 # ==================== PHASE 2: SERVICE ENUMERATION ====================
@@ -120,7 +134,7 @@ echo "  PHASE 2: SERVICE ENUMERATION"
 echo "═══════════════════════════════════════════════════════"
 echo -e "${NC}"
 
-echo -e "${CYAN}[*] Performing service version detection on discovered ports...${NC}"
+echo -e "${CYAN}[*] Performing service version detection on ${BOLD}${PORT_COUNT}${NC}${CYAN} discovered ports...${NC}"
 echo -e "${CYAN}[*] Using aggressive version detection (-sV --version-all)${NC}"
 
 nmap -p$OPEN_PORTS -sV --version-all -sC -Pn -n \
@@ -149,8 +163,8 @@ echo "  PHASE 3: BEHAVIORAL ANALYSIS"
 echo "═══════════════════════════════════════════════════════"
 echo -e "${NC}"
 
-echo -e "${CYAN}[*] Running advanced scripts and OS detection...${NC}"
-echo -e "${CYAN}[*] Using aggressive scanning with traceroute${NC}"
+echo -e "${CYAN}[*] Running advanced scripts and OS detection on ${BOLD}${PORT_COUNT}${NC}${CYAN} ports...${NC}"
+echo -e "${CYAN}[*] Using aggressive scanning with vulnerability detection${NC}"
 
 nmap -p$OPEN_PORTS -A -sC --script=default,vuln -Pn -n \
     -$TIMING -vv \
@@ -178,12 +192,29 @@ echo -e "${CYAN}[✓] Scan Summary:${NC}"
 echo -e "    Target: ${BOLD}$TARGET${NC}"
 echo -e "    Scan Name: ${BOLD}$SCAN_NAME${NC}"
 echo -e "    Timing: ${BOLD}$TIMING${NC}"
+echo -e "    Total Ports: ${BOLD}${PORT_COUNT}${NC}"
 echo -e "    Open Ports: ${BOLD}$OPEN_PORTS${NC}"
 echo -e "    Output Directory: ${BOLD}$OUTPUT_DIR${NC}"
 echo ""
-echo -e "${YELLOW}[*] All results saved in: ${BOLD}$OUTPUT_DIR${NC}"
-echo -e "${YELLOW}[*] Phase 1: Port Discovery${NC}"
-echo -e "${YELLOW}[*] Phase 2: Service Enumeration${NC}"
-echo -e "${YELLOW}[*] Phase 3: Behavioral Analysis${NC}"
+echo -e "${YELLOW}[*] All results saved in: ${BOLD}$OUTPUT_DIR/${NC}"
+echo -e "${YELLOW}[*] Phase 1: Port Discovery → ${PHASE1_NAME}.*${NC}"
+echo -e "${YELLOW}[*] Phase 2: Service Enumeration → ${PHASE2_NAME}.*${NC}"
+echo -e "${YELLOW}[*] Phase 3: Behavioral Analysis → ${PHASE3_NAME}.*${NC}"
 echo ""
+
+# Generate quick summary
+echo -e "${CYAN}[*] Generating quick summary...${NC}"
+echo -e "\n${BOLD}═══ Quick Service Summary ═══${NC}" > "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Scan: $SCAN_NAME" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Target: $TARGET" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Date: $(date)" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Timing: $TIMING" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Total Open Ports: $PORT_COUNT" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "Open Ports: $OPEN_PORTS" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "" >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo "═══ Detailed Results ═══" >> "${OUTPUT_DIR}/SUMMARY.txt"
+grep -E "^[0-9]+/tcp.*open" "${PHASE2_OUTPUT}.txt" 2>/dev/null >> "${OUTPUT_DIR}/SUMMARY.txt"
+
+echo -e "${GREEN}[✓] Summary saved: ${BOLD}${OUTPUT_DIR}/SUMMARY.txt${NC}\n"
 echo -e "${GREEN}${BOLD}Happy Hunting! 🎯${NC}"
