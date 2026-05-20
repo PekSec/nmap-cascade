@@ -3,8 +3,8 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # ==================== CONFIG ====================
-MIN_RATE="${MIN_RATE:-1000}"
-MAX_RETRIES="${MAX_RETRIES:-1}"
+MIN_RATE="${MIN_RATE:-750}"
+MAX_RETRIES="${MAX_RETRIES:-2}"
 
 # ==================== COLORS ====================
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
