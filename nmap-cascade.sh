@@ -1,220 +1,340 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-BOLD='\033[1m'
+# ==================== CONFIG ====================
+MIN_RATE="${MIN_RATE:-1000}"
+MAX_RETRIES="${MAX_RETRIES:-1}"
 
-# Banner
+# ==================== COLORS ====================
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    MAGENTA='\033[0;35m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    MAGENTA=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
+# ==================== HELPERS ====================
+die() {
+    echo -e "${RED}[!] $*${NC}" >&2
+    exit 1
+}
+
+warn() {
+    echo -e "${YELLOW}[*] $*${NC}"
+}
+
+info() {
+    echo -e "${CYAN}[*] $*${NC}"
+}
+
+ok() {
+    echo -e "${GREEN}[✓] $*${NC}"
+}
+
+section() {
+    local title="$1"
+
+    echo -e "${MAGENTA}${BOLD}"
+    echo "═══════════════════════════════════════════════════════"
+    echo "  ${title}"
+    echo "═══════════════════════════════════════════════════════"
+    echo -e "${NC}"
+}
+
+require_command() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
+}
+
+prompt_required() {
+    local prompt="$1"
+    local value
+
+    read -r -p "$prompt" value
+    [[ -n "$value" ]] || die "This field is mandatory."
+
+    printf '%s' "$value"
+}
+
+sanitize_name() {
+    local raw="$1"
+    local sanitized
+
+    sanitized="$(printf '%s' "$raw" | sed 's/[^[:alnum:]._-]/_/g')"
+    sanitized="${sanitized##_}"
+    sanitized="${sanitized%%_}"
+
+    [[ -n "$sanitized" ]] || sanitized="scan"
+
+    printf '%s' "$sanitized"
+}
+
+count_ports() {
+    local ports="$1"
+
+    if [[ -z "$ports" ]]; then
+        printf '0'
+        return
+    fi
+
+    local without_commas="${ports//,/}"
+    printf '%d' "$(( ${#ports} - ${#without_commas} + 1 ))"
+}
+
+extract_open_ports() {
+    local gnmap_file="$1"
+    local normal_file="$2"
+    local ports=""
+
+    # Preferred: grepable nmap output
+    if [[ -s "$gnmap_file" ]]; then
+        ports="$(
+            awk '
+                /Ports:/ {
+                    sub(/^.*Ports: /, "")
+                    n = split($0, entries, ",")
+                    for (i = 1; i <= n; i++) {
+                        gsub(/^ +| +$/, "", entries[i])
+                        split(entries[i], f, "/")
+                        if (f[2] == "open" && f[3] == "tcp") {
+                            print f[1]
+                        }
+                    }
+                }
+            ' "$gnmap_file" | sort -n -u | paste -sd, -
+        )"
+    fi
+
+    # Fallback: normal nmap output
+    if [[ -z "$ports" && -s "$normal_file" ]]; then
+        warn "Trying fallback port extraction from normal output..."
+
+        ports="$(
+            awk '
+                $1 ~ /^[0-9]+\/tcp$/ && $2 == "open" {
+                    sub("/tcp", "", $1)
+                    print $1
+                }
+            ' "$normal_file" | sort -n -u | paste -sd, -
+        )"
+    fi
+
+    printf '%s' "$ports"
+}
+
+run_nmap_phase() {
+    local phase_title="$1"
+    local output_base="$2"
+
+    shift 2
+
+    section "$phase_title"
+
+    local cmd=(
+        nmap
+        "$@"
+        "-${TIMING}"
+        -vv
+        -oN "${output_base}.txt"
+        -oX "${output_base}.xml"
+        -oG "${output_base}.gnmap"
+        "$TARGET"
+    )
+
+    info "Running: ${cmd[*]}"
+
+    if ! "${cmd[@]}"; then
+        die "${phase_title} failed."
+    fi
+
+    ok "${phase_title} complete."
+    ok "Output: ${output_base}.{txt,xml,gnmap}"
+    echo
+}
+
+write_summary() {
+    local summary_file="${OUTPUT_DIR}/SUMMARY.txt"
+
+    info "Generating quick summary..."
+
+    {
+        echo "═══ Quick Service Summary ═══"
+        echo "Scan: $SCAN_NAME"
+        echo "Target: $TARGET"
+        echo "Date: $(date)"
+        echo "Timing: $TIMING"
+        echo "Total Open Ports: $PORT_COUNT"
+        echo
+        echo "Open Ports: $OPEN_PORTS"
+        echo
+        echo "═══ Detailed Results ═══"
+
+        if [[ -s "${PHASE2_OUTPUT}.txt" ]]; then
+            awk '$1 ~ /^[0-9]+\/tcp$/ && $2 == "open"' "${PHASE2_OUTPUT}.txt"
+        fi
+    } > "$summary_file"
+
+    ok "Summary saved: ${summary_file}"
+}
+
+# ==================== PRE-FLIGHT ====================
+require_command nmap
+require_command awk
+require_command sort
+require_command paste
+require_command sed
+
+trap 'die "Unexpected error near line ${LINENO}."' ERR
+
+# ==================== BANNER ====================
 echo -e "${CYAN}${BOLD}"
 echo "╔═══════════════════════════════════════════════════════╗"
-echo "║         3-PHASE NMAP SCANNER v1.1                     ║"
+echo "║         3-PHASE NMAP SCANNER v1.2                     ║"
 echo "║         Advanced Port Discovery & Analysis            ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# Check if running as root
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script should be run as root for best results${NC}"
-   echo -e "${YELLOW}[*] Some features may not work without root privileges${NC}"
+# Root-aware scan type
+if [[ "${EUID}" -eq 0 ]]; then
+    TCP_DISCOVERY_SCAN=(-sS)
+    info "Root privileges detected. Using SYN scan: -sS"
+else
+    TCP_DISCOVERY_SCAN=(-sT)
+    warn "Not running as root. Falling back to TCP connect scan: -sT"
+    warn "For best performance and stealth, run as root to use SYN scan."
 fi
 
-# Mandatory: Get scan name
-echo -e "${YELLOW}${BOLD}[*] Enter scan name (mandatory):${NC}"
-read -p "Scan Name: " SCAN_NAME
+# ==================== INPUT ====================
+echo -e "${YELLOW}${BOLD}[*] Enter scan name mandatory:${NC}"
+SCAN_NAME_RAW="$(prompt_required "Scan Name: ")"
+SCAN_NAME="$(sanitize_name "$SCAN_NAME_RAW")"
 
-if [ -z "$SCAN_NAME" ]; then
-    echo -e "${RED}[!] Error: Scan name is mandatory!${NC}"
-    exit 1
-fi
+echo -e "\n${YELLOW}${BOLD}[*] Select timing template mandatory:${NC}"
+echo -e "${CYAN}  T0 - Paranoid very slow, IDS evasion${NC}"
+echo -e "${CYAN}  T1 - Sneaky slow, IDS evasion${NC}"
+echo -e "${CYAN}  T2 - Polite slow, less bandwidth${NC}"
+echo -e "${CYAN}  T3 - Normal default, balanced${NC}"
+echo -e "${CYAN}  T4 - Aggressive fast, assumes good network${NC}"
+echo -e "${CYAN}  T5 - Insane very fast, may miss ports${NC}"
 
-# Mandatory: Get timing template
-echo -e "\n${YELLOW}${BOLD}[*] Select timing template (mandatory):${NC}"
-echo -e "${CYAN}  T0 - Paranoid (Very slow, IDS evasion)${NC}"
-echo -e "${CYAN}  T1 - Sneaky (Slow, IDS evasion)${NC}"
-echo -e "${CYAN}  T2 - Polite (Slow, less bandwidth)${NC}"
-echo -e "${CYAN}  T3 - Normal (Default, balanced)${NC}"
-echo -e "${CYAN}  T4 - Aggressive (Fast, assumes good network)${NC}"
-echo -e "${CYAN}  T5 - Insane (Very fast, may miss ports)${NC}"
-
-read -p "Timing (T0-T5): " TIMING
+TIMING="$(prompt_required "Timing T0-T5: ")"
 
 if [[ ! "$TIMING" =~ ^[Tt][0-5]$ ]]; then
-    echo -e "${RED}[!] Error: Invalid timing template! Use T0-T5${NC}"
-    exit 1
+    die "Invalid timing template. Use T0-T5."
 fi
 
-TIMING=$(echo "$TIMING" | tr '[:lower:]' '[:upper:]')
+TIMING="${TIMING^^}"
 
-# Get target
-echo -e "\n${YELLOW}${BOLD}[*] Enter target IP or hostname:${NC}"
-read -p "Target: " TARGET
+echo -e "\n${YELLOW}${BOLD}[*] Enter target IP, hostname, or CIDR:${NC}"
+TARGET="$(prompt_required "Target: ")"
 
-if [ -z "$TARGET" ]; then
-    echo -e "${RED}[!] Error: Target is required!${NC}"
-    exit 1
-fi
-
-# Create output directory
+# ==================== OUTPUT SETUP ====================
 OUTPUT_DIR="nmap_${SCAN_NAME}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR"
 
-echo -e "\n${GREEN}[✓] Configuration:${NC}"
-echo -e "    Scan Name: ${BOLD}$SCAN_NAME${NC}"
-echo -e "    Timing: ${BOLD}$TIMING${NC}"
-echo -e "    Target: ${BOLD}$TARGET${NC}"
-echo -e "    Output Dir: ${BOLD}$OUTPUT_DIR${NC}"
-echo ""
-
-# ==================== PHASE 1: QUICK PORT DISCOVERY ====================
 PHASE1_NAME="${SCAN_NAME}_phase-1"
-PHASE1_OUTPUT="${OUTPUT_DIR}/${PHASE1_NAME}"
-
-echo -e "${MAGENTA}${BOLD}"
-echo "═══════════════════════════════════════════════════════"
-echo "  PHASE 1: QUICK PORT DISCOVERY"
-echo "═══════════════════════════════════════════════════════"
-echo -e "${NC}"
-
-echo -e "${CYAN}[*] Scanning all TCP ports (1-65535)...${NC}"
-echo -e "${CYAN}[*] Using SYN scan for speed and stealth${NC}"
-
-nmap -p- -sS -Pn -n --min-rate=1000 --max-retries=1 \
-    -$TIMING -vv \
-    -oN "${PHASE1_OUTPUT}.txt" \
-    -oX "${PHASE1_OUTPUT}.xml" \
-    -oG "${PHASE1_OUTPUT}.gnmap" \
-    $TARGET
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Phase 1 failed!${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}[✓] Phase 1 complete!${NC}"
-echo -e "${GREEN}[✓] Output: ${PHASE1_OUTPUT}.*${NC}\n"
-
-# Extract open ports - FIXED VERSION
-# Try gnmap format first (most reliable)
-OPEN_PORTS=$(grep "Ports:" "${PHASE1_OUTPUT}.gnmap" 2>/dev/null | grep -oP '\d+/open' | cut -d'/' -f1 | sort -nu | tr '\n' ',' | sed 's/,$//')
-
-# Fallback to normal output if gnmap parsing fails
-if [ -z "$OPEN_PORTS" ]; then
-    echo -e "${YELLOW}[*] Trying alternative port extraction method...${NC}"
-    OPEN_PORTS=$(awk '/^[0-9]+\/tcp.*open/ {print $1}' "${PHASE1_OUTPUT}.txt" | cut -d'/' -f1 | sort -nu | tr '\n' ',' | sed 's/,$//')
-fi
-
-if [ -z "$OPEN_PORTS" ]; then
-    echo -e "${RED}[!] No open ports found! Exiting.${NC}"
-    echo -e "${YELLOW}[*] Check the output files for details:${NC}"
-    echo -e "    ${PHASE1_OUTPUT}.txt"
-    echo -e "    ${PHASE1_OUTPUT}.gnmap"
-    exit 1
-fi
-
-# Count ports
-PORT_COUNT=$(echo "$OPEN_PORTS" | tr ',' '\n' | wc -l)
-
-echo -e "${GREEN}[✓] ${BOLD}${PORT_COUNT}${NC}${GREEN} open ports discovered:${NC}"
-echo -e "${BOLD}$OPEN_PORTS${NC}\n"
-sleep 2
-
-# ==================== PHASE 2: SERVICE ENUMERATION ====================
 PHASE2_NAME="${SCAN_NAME}_phase-2"
-PHASE2_OUTPUT="${OUTPUT_DIR}/${PHASE2_NAME}"
-
-echo -e "${MAGENTA}${BOLD}"
-echo "═══════════════════════════════════════════════════════"
-echo "  PHASE 2: SERVICE ENUMERATION"
-echo "═══════════════════════════════════════════════════════"
-echo -e "${NC}"
-
-echo -e "${CYAN}[*] Performing service version detection on ${BOLD}${PORT_COUNT}${NC}${CYAN} discovered ports...${NC}"
-echo -e "${CYAN}[*] Using aggressive version detection (-sV --version-all)${NC}"
-
-nmap -p$OPEN_PORTS -sV --version-all -sC -Pn -n \
-    -$TIMING -vv \
-    -oN "${PHASE2_OUTPUT}.txt" \
-    -oX "${PHASE2_OUTPUT}.xml" \
-    -oG "${PHASE2_OUTPUT}.gnmap" \
-    $TARGET
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Phase 2 failed!${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}[✓] Phase 2 complete!${NC}"
-echo -e "${GREEN}[✓] Output: ${PHASE2_OUTPUT}.*${NC}\n"
-sleep 2
-
-# ==================== PHASE 3: BEHAVIORAL ANALYSIS ====================
 PHASE3_NAME="${SCAN_NAME}_phase-3"
+
+PHASE1_OUTPUT="${OUTPUT_DIR}/${PHASE1_NAME}"
+PHASE2_OUTPUT="${OUTPUT_DIR}/${PHASE2_NAME}"
 PHASE3_OUTPUT="${OUTPUT_DIR}/${PHASE3_NAME}"
 
-echo -e "${MAGENTA}${BOLD}"
-echo "═══════════════════════════════════════════════════════"
-echo "  PHASE 3: BEHAVIORAL ANALYSIS"
-echo "═══════════════════════════════════════════════════════"
-echo -e "${NC}"
+echo -e "\n${GREEN}[✓] Configuration:${NC}"
+echo -e "    Scan Name: ${BOLD}${SCAN_NAME}${NC}"
+echo -e "    Timing: ${BOLD}${TIMING}${NC}"
+echo -e "    Target: ${BOLD}${TARGET}${NC}"
+echo -e "    Output Dir: ${BOLD}${OUTPUT_DIR}${NC}"
+echo -e "    Discovery Scan: ${BOLD}${TCP_DISCOVERY_SCAN[*]}${NC}"
+echo
 
-echo -e "${CYAN}[*] Running advanced scripts and OS detection on ${BOLD}${PORT_COUNT}${NC}${CYAN} ports...${NC}"
-echo -e "${CYAN}[*] Using aggressive scanning with vulnerability detection${NC}"
+# ==================== PHASE 1 ====================
+info "Phase 1 will scan all TCP ports 1-65535."
+info "Using --open to reduce output noise and speed up parsing."
 
-nmap -p$OPEN_PORTS -A -sC --script=default,vuln -Pn -n \
-    -$TIMING -vv \
-    -oN "${PHASE3_OUTPUT}.txt" \
-    -oX "${PHASE3_OUTPUT}.xml" \
-    -oG "${PHASE3_OUTPUT}.gnmap" \
-    $TARGET
+run_nmap_phase \
+    "PHASE 1: QUICK PORT DISCOVERY" \
+    "$PHASE1_OUTPUT" \
+    -p- \
+    "${TCP_DISCOVERY_SCAN[@]}" \
+    -Pn \
+    -n \
+    --open \
+    --min-rate "$MIN_RATE" \
+    --max-retries "$MAX_RETRIES"
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Phase 3 failed!${NC}"
-    exit 1
+OPEN_PORTS="$(extract_open_ports "${PHASE1_OUTPUT}.gnmap" "${PHASE1_OUTPUT}.txt")"
+
+if [[ -z "$OPEN_PORTS" ]]; then
+    echo -e "${YELLOW}[*] Check output files for details:${NC}"
+    echo -e "    ${PHASE1_OUTPUT}.txt"
+    echo -e "    ${PHASE1_OUTPUT}.gnmap"
+    die "No open TCP ports found. Exiting."
 fi
 
-echo -e "${GREEN}[✓] Phase 3 complete!${NC}"
-echo -e "${GREEN}[✓] Output: ${PHASE3_OUTPUT}.*${NC}\n"
+PORT_COUNT="$(count_ports "$OPEN_PORTS")"
+
+ok "${BOLD}${PORT_COUNT}${NC}${GREEN} open TCP ports discovered:"
+echo -e "${BOLD}${OPEN_PORTS}${NC}\n"
+
+# ==================== PHASE 2 ====================
+info "Phase 2 will run service/version detection and default scripts on discovered ports."
+
+run_nmap_phase \
+    "PHASE 2: SERVICE ENUMERATION" \
+    "$PHASE2_OUTPUT" \
+    -p "$OPEN_PORTS" \
+    -sV \
+    --version-all \
+    -sC \
+    -Pn \
+    -n
+
+# ==================== PHASE 3 ====================
+info "Phase 3 will run aggressive analysis and vuln NSE category on discovered ports."
+
+run_nmap_phase \
+    "PHASE 3: BEHAVIORAL ANALYSIS" \
+    "$PHASE3_OUTPUT" \
+    -p "$OPEN_PORTS" \
+    -A \
+    --script default,vuln \
+    -Pn \
+    -n
 
 # ==================== SUMMARY ====================
-echo -e "${GREEN}${BOLD}"
-echo "═══════════════════════════════════════════════════════"
-echo "  SCAN COMPLETE!"
-echo "═══════════════════════════════════════════════════════"
-echo -e "${NC}"
+section "SCAN COMPLETE"
 
 echo -e "${CYAN}[✓] Scan Summary:${NC}"
-echo -e "    Target: ${BOLD}$TARGET${NC}"
-echo -e "    Scan Name: ${BOLD}$SCAN_NAME${NC}"
-echo -e "    Timing: ${BOLD}$TIMING${NC}"
+echo -e "    Target: ${BOLD}${TARGET}${NC}"
+echo -e "    Scan Name: ${BOLD}${SCAN_NAME}${NC}"
+echo -e "    Timing: ${BOLD}${TIMING}${NC}"
 echo -e "    Total Ports: ${BOLD}${PORT_COUNT}${NC}"
-echo -e "    Open Ports: ${BOLD}$OPEN_PORTS${NC}"
-echo -e "    Output Directory: ${BOLD}$OUTPUT_DIR${NC}"
-echo ""
-echo -e "${YELLOW}[*] All results saved in: ${BOLD}$OUTPUT_DIR/${NC}"
-echo -e "${YELLOW}[*] Phase 1: Port Discovery → ${PHASE1_NAME}.*${NC}"
-echo -e "${YELLOW}[*] Phase 2: Service Enumeration → ${PHASE2_NAME}.*${NC}"
-echo -e "${YELLOW}[*] Phase 3: Behavioral Analysis → ${PHASE3_NAME}.*${NC}"
-echo ""
+echo -e "    Open Ports: ${BOLD}${OPEN_PORTS}${NC}"
+echo -e "    Output Directory: ${BOLD}${OUTPUT_DIR}${NC}"
+echo
 
-# Generate quick summary
-echo -e "${CYAN}[*] Generating quick summary...${NC}"
-echo -e "\n${BOLD}═══ Quick Service Summary ═══${NC}" > "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Scan: $SCAN_NAME" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Target: $TARGET" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Date: $(date)" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Timing: $TIMING" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Total Open Ports: $PORT_COUNT" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "Open Ports: $OPEN_PORTS" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "" >> "${OUTPUT_DIR}/SUMMARY.txt"
-echo "═══ Detailed Results ═══" >> "${OUTPUT_DIR}/SUMMARY.txt"
-grep -E "^[0-9]+/tcp.*open" "${PHASE2_OUTPUT}.txt" 2>/dev/null >> "${OUTPUT_DIR}/SUMMARY.txt"
+echo -e "${YELLOW}[*] All results saved in: ${BOLD}${OUTPUT_DIR}/${NC}"
+echo -e "${YELLOW}[*] Phase 1: Port Discovery      -> ${PHASE1_NAME}.*${NC}"
+echo -e "${YELLOW}[*] Phase 2: Service Enumeration -> ${PHASE2_NAME}.*${NC}"
+echo -e "${YELLOW}[*] Phase 3: Behavioral Analysis -> ${PHASE3_NAME}.*${NC}"
+echo
 
-echo -e "${GREEN}[✓] Summary saved: ${BOLD}${OUTPUT_DIR}/SUMMARY.txt${NC}\n"
-echo -e "${GREEN}${BOLD}Happy Hunting! 🎯${NC}"
+write_summary
+
+echo
+echo -e "${GREEN}${BOLD}Happy Hunting!${NC}"
