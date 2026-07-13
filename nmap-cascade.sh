@@ -74,9 +74,7 @@ sanitize_name() {
     local raw="$1"
     local sanitized
 
-    sanitized="$(printf '%s' "$raw" | sed 's/[^[:alnum:]._-]/_/g')"
-    sanitized="${sanitized##_}"
-    sanitized="${sanitized%%_}"
+    sanitized="$(printf '%s' "$raw" | sed 's/[^[:alnum:]._-]/_/g; s/^_*//; s/_*$//')"
 
     [[ -n "$sanitized" ]] || sanitized="scan"
 
@@ -155,7 +153,9 @@ run_nmap_phase() {
         "$TARGET"
     )
 
-    info "Running: ${cmd[*]}"
+    # Join args with spaces explicitly: global IFS starts with newline,
+    # so "${cmd[*]}" would otherwise print each arg on its own line.
+    info "Running: $(IFS=' '; printf '%s' "${cmd[*]}")"
 
     if ! "${cmd[@]}"; then
         die "${phase_title} failed."
@@ -211,10 +211,14 @@ echo -e "${NC}"
 # Root-aware scan type
 if [[ "${EUID}" -eq 0 ]]; then
     TCP_DISCOVERY_SCAN=(-sS)
+    # OS detection (-O) and traceroute require raw sockets (root only).
+    PHASE3_PRIV=(-O --traceroute)
     info "Root privileges detected. Using SYN scan: -sS"
 else
     TCP_DISCOVERY_SCAN=(-sT)
+    PHASE3_PRIV=()
     warn "Not running as root. Falling back to TCP connect scan: -sT"
+    warn "OS detection and traceroute (Phase 3) will be skipped without root."
     warn "For best performance and stealth, run as root to use SYN scan."
 fi
 
@@ -298,6 +302,7 @@ run_nmap_phase \
     "PHASE 2: SERVICE ENUMERATION" \
     "$PHASE2_OUTPUT" \
     -p "$OPEN_PORTS" \
+    "${TCP_DISCOVERY_SCAN[@]}" \
     -sV \
     --version-all \
     -sC \
@@ -305,14 +310,19 @@ run_nmap_phase \
     -n
 
 # ==================== PHASE 3 ====================
-info "Phase 3 will run aggressive analysis and vuln NSE category on discovered ports."
+info "Phase 3 will run vuln NSE category (plus OS/traceroute if root) on discovered ports."
 
+# Default NSE scripts already ran in Phase 2 (-sC); Phase 3 adds only the
+# vuln category. -sV stays because vuln scripts match on version data
+# detected within the same nmap invocation (phases are separate processes).
 run_nmap_phase \
     "PHASE 3: BEHAVIORAL ANALYSIS" \
     "$PHASE3_OUTPUT" \
     -p "$OPEN_PORTS" \
-    -A \
-    --script default,vuln \
+    "${TCP_DISCOVERY_SCAN[@]}" \
+    -sV \
+    ${PHASE3_PRIV[@]+"${PHASE3_PRIV[@]}"} \
+    --script vuln \
     -Pn \
     -n
 
