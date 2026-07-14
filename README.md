@@ -9,6 +9,7 @@
 ## 🎯 Overview
 
 Automated Nmap scanning framework that intelligently cascades through three phases, using discovered ports from each phase to optimize subsequent scans.
+
 ```
 Phase 1: Port Discovery    → Fast SYN scan (all 65535 ports)
 Phase 2: Service Enum      → Version detection on discovered ports only
@@ -25,6 +26,7 @@ Phase 3: Deep Analysis     → Vulnerability scanning & OS detection
 - 🔍 **Double Verbosity**: Enhanced scanning details (-vv flag)
 
 ## 📦 Installation
+
 ```bash
 git clone https://github.com/yourusername/nmap-cascade.git
 cd nmap-cascade
@@ -32,16 +34,19 @@ chmod +x nmap-cascade.sh
 ```
 
 ## 🚀 Usage
+
 ```bash
 sudo ./nmap-cascade.sh
 ```
 
 **Interactive prompts will request:**
+
 - Scan name (mandatory)
 - Timing template: T0-T5 (mandatory)
 - Target IP or hostname
 
 ## 📋 Example
+
 ```bash
 $ sudo ./nmap-cascade.sh
 
@@ -57,6 +62,7 @@ Results saved in: nmap_production-scan_20260106_143022/
 ```
 
 ## 📂 Output Structure
+
 ```
 nmap_<scan-name>_<timestamp>/
 ├── <scan-name>_phase-1.txt|xml|gnmap    # Port discovery
@@ -70,6 +76,7 @@ nmap_<scan-name>_<timestamp>/
 - Nmap 7.0+
 - Bash 4.0+
 - Root/sudo privileges (recommended)
+
 ---
 
 ⭐ If you find this useful, please star the repo!
