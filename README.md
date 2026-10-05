@@ -1,4 +1,4 @@
-# Nmap Cascade
+# 🔱 Nmap Cascade
 
 An accuracy-first IPv4/TCP scanner with two network stages and a reporting stage.
 
