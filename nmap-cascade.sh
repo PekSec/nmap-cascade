@@ -117,22 +117,18 @@ TARGET="$(prompt_required 'Target IPv4, hostname, or IPv4 CIDR: ')"
 # Only validated hostnames may enter NSE's script-argument syntax.
 HOSTNAME_CONTEXT="$(python3 "$HELPER" target "$TARGET")"
 
-DISCOVERY_OPTIONS=()
-if [[ -n "${MIN_RATE+x}" ]]; then
-    python3 "$HELPER" rate "$MIN_RATE"
-    DISCOVERY_OPTIONS+=(--min-rate "$MIN_RATE")
-fi
-if [[ -n "${MAX_RETRIES+x}" ]]; then
-    [[ "$MAX_RETRIES" =~ ^[0-9]+$ ]] || die 'MAX_RETRIES must be a nonnegative integer.'
-    DISCOVERY_OPTIONS+=(--max-retries "$MAX_RETRIES")
-fi
+# Keep full-range discovery cheap; export effective values for report metadata.
+# Use unset-only defaults so explicitly empty/invalid overrides still fail.
+export MIN_RATE="${MIN_RATE-750}" MAX_RETRIES="${MAX_RETRIES-2}"
+python3 "$HELPER" rate "$MIN_RATE"
+[[ "$MAX_RETRIES" =~ ^[0-9]+$ ]] || die 'MAX_RETRIES must be a nonnegative integer.'
+DISCOVERY_OPTIONS=(--min-rate "$MIN_RATE" --max-retries "$MAX_RETRIES")
 
 TCP_SCAN=(-sT)
 ENRICHMENT_OPTIONS=()
 if [[ "$EUID" -eq 0 ]]; then
     TCP_SCAN=(-sS)
-    DISCOVERY_OPTIONS+=(-O --osscan-limit)
-    ENRICHMENT_OPTIONS+=(--traceroute)
+    ENRICHMENT_OPTIONS+=(-O --max-os-tries 1 --traceroute)
 else
     info 'Using TCP connect scans; OS detection and traceroute skipped without root.'
 fi
@@ -151,7 +147,7 @@ nmap --version > "$OUTPUT_DIR/nmap-version.txt"
 run_command script-selection "$OUTPUT_DIR/script-selection" check-selection \
     nmap --script-help "$NSE_SELECTION" -oX "$OUTPUT_DIR/script-selection.xml"
 
-info 'PHASE 1: full TCP discovery and OS detection where supported.'
+info "PHASE 1: port discovery only (TCP 1-65535; min-rate $MIN_RATE; max-retries $MAX_RETRIES)."
 run_nmap_phase discovery "$OUTPUT_DIR/${SCAN_NAME}_phase-1" "$TARGET" \
     -p- "${DISCOVERY_OPTIONS[@]}"
 python3 "$HELPER" jobs "$OUTPUT_DIR/${SCAN_NAME}_phase-1.xml" > "$OUTPUT_DIR/jobs.tsv"
@@ -162,6 +158,7 @@ if [[ ! -s "$OUTPUT_DIR/jobs.tsv" ]]; then
     info 'No open TCP ports observed; enrichment skipped.'
 fi
 while IFS=$'\t' read -r address ports; do
+    info "Enrichment target: $address; discovered TCP ports: $ports"
     run_nmap_phase "enrichment:$address" "$OUTPUT_DIR/${SCAN_NAME}_phase-2_${address}" "$address" \
         -p "$ports" -sV --version-all --script "$NSE_SELECTION" "${ENRICHMENT_OPTIONS[@]}"
 done < "$OUTPUT_DIR/jobs.tsv"

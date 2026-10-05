@@ -137,17 +137,25 @@ class CascadeTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)  # one discovery, one enrichment per host
         self.assertEqual([(a[-1], a[a.index("-p")+1]) for a in calls[1:]],
                          [("192.0.2.1", "22"), ("192.0.2.2", "443")])
-        self.assertNotIn("--min-rate", calls[0])
-        self.assertNotIn("--max-retries", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--min-rate")+1], "750")
+        self.assertEqual(calls[0][calls[0].index("--max-retries")+1], "2")
+        for flag in ("-O", "--osscan-limit", "--traceroute", "-sV", "-sC", "--script", "--version-all"):
+            self.assertNotIn(flag, calls[0])
         self.assertNotIn("--open", calls[0])
         for call in calls[1:]:
             self.assertIn("--version-all", call)
             self.assertIn("--script", call)
             self.assertNotIn("-sC", call)
-        self.assertEqual("-O" in calls[0], os.geteuid() == 0)
+            self.assertNotIn("--min-rate", call)
+            self.assertNotIn("--max-retries", call)
+            self.assertEqual("-O" in call, os.geteuid() == 0)
+            if os.geteuid() == 0:
+                self.assertEqual(call[call.index("--max-os-tries")+1], "1")
         self.assertEqual("--traceroute" in calls[1], os.geteuid() == 0)
         report, directory = self.report()
         self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["min_rate"], "750")
+        self.assertEqual(report["max_retries"], "2")
         self.assertEqual(report["counts"]["discovered_open_endpoints"], 2)
         self.assertEqual(report["counts"]["latest_observed_open_endpoints"], 1)
         self.assertEqual(report["hosts"][0]["state_changes"][0]["to"], "closed")
@@ -192,6 +200,10 @@ class CascadeTest(unittest.TestCase):
         calls = self.calls()
         self.assertIn("-T3", calls[0])
         self.assertEqual(calls[0][calls[0].index("--min-rate")+1], "123.5")
+        self.assertEqual(calls[0][calls[0].index("--max-retries")+1], "4")
+        report, _ = self.report()
+        self.assertEqual(report["min_rate"], "123.5")
+        self.assertEqual(report["max_retries"], "4")
         for call in calls[1:]:
             self.assertIn("http.host=example.test,tls.servername=example.test", call)
             self.assertTrue(call[-1].startswith("192.0.2."))

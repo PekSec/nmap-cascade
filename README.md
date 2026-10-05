@@ -1,15 +1,15 @@
 # 🔱 Nmap Cascade
 
-An accuracy-first IPv4/TCP scanner with two network stages and a reporting stage.
+An IPv4/TCP scanner with fast port discovery, targeted analysis, and offline reporting.
 
 ```mermaid
 flowchart TD
     Input["Validate target and timing<br/>Create a unique output directory"]
     Policy["Record Nmap version and selected NSE scripts"]
-    Discovery["1. Discovery<br/>TCP 1-65535 with adaptive timing<br/>OS detection when root and conditions permit"]
+    Discovery["1. Port discovery only<br/>TCP 1-65535<br/>Default min-rate 750; max-retries 2"]
     XML["Validate discovery XML<br/>Preserve host, protocol, port and state"]
     Ports{"Any open TCP ports?"}
-    Enrichment["2. Enrichment — once per discovered host<br/>Pinned IP and that host's own ports<br/>Service/version detection + selected NSE scripts<br/>Hostname context preserved; traceroute when root"]
+    Enrichment["2. Enrichment — once per discovered host<br/>Pinned IP and that host's own open ports<br/>Service/version detection + selected NSE scripts<br/>Hostname context preserved<br/>OS detection: one attempt; traceroute when root"]
     Empty["Skip enrichment<br/>Keep the valid zero-open-port result"]
     Partial["Stop remaining network stages<br/>Retain collected evidence and failure status"]
     Report["3. Reporting — no network traffic<br/>Reconcile observations and state changes<br/>Keep errors, uncertainty and coverage limits visible"]
@@ -57,26 +57,33 @@ address, DNS hostname, or IPv4 CIDR. IPv6, target lists, hostname/CIDR combinati
 and Nmap's octet-range syntax are not supported and are rejected before scanning.
 Run from the directory where you want the results saved.
 
-Nmap controls its own adaptive rate and retries by default. Explicit overrides
-remain available and are recorded in the report:
+Discovery defaults to `--min-rate 750 --max-retries 2`. These controls apply only
+to the full port sweep, not service/NSE enrichment. Effective values, including
+defaults, are recorded in the report. Override them for the target network:
 
 ```bash
-MIN_RATE=750 MAX_RETRIES=2 ./nmap-cascade.sh
+MIN_RATE=300 MAX_RETRIES=4 ./nmap-cascade.sh
 # With root, pass overrides through sudo explicitly:
-sudo env MIN_RATE=750 MAX_RETRIES=2 ./nmap-cascade.sh
+sudo env MIN_RATE=300 MAX_RETRIES=4 ./nmap-cascade.sh
 ```
 
 `MIN_RATE` must be a positive decimal number and `MAX_RETRIES` a nonnegative
 integer. These settings trade discovery accuracy for speed. A port missed in
 discovery is not recovered by scanning only the discovered ports later.
 
+Discovery probes all 65,535 TCP ports even if only three are open. Silent ports,
+packet loss, and response rate limits can dominate the runtime. The minimum rate
+is a requested sending rate, not a completion deadline; timing templates and
+system/network limits still matter. `T0`–`T2` deliberately favor slower scans.
+Nmap's progress estimate is not a promised finish time. See the
+[Nmap timing reference](https://nmap.org/book/man-performance.html).
+
 ## What the stages do
 
 **Discovery:** scans TCP 1–65535 with `-Pn`, retaining non-open states in XML.
+It performs no service/version detection, NSE execution, OS detection, or traceroute.
 `-Pn` prevents a ping-only gate from excluding hosts; a `user-set` up status is
-not proof of a response. Root scans include `-O --osscan-limit`, so OS detection
-has access to both open and closed ports from the same invocation. Hosts that
-lack suitable ports may have no OS result. A successful scan with no open TCP
+not proof of a response. A successful scan with no open TCP
 ports produces a report and skips enrichment.
 
 **Enrichment:** runs `-sV --version-all` and this NSE selection together:
@@ -84,6 +91,14 @@ ports produces a report and skips enrichment.
 ```text
 (default or vuln) and safe and not external and not intrusive
 ```
+
+Only that host's discovered open TCP ports enter the second scan. With root,
+`-O --max-os-tries 1 --traceroute` runs here as well. OS detection may be less
+reliable without a closed TCP port in the targeted scan; the report preserves
+Nmap's match accuracy and this limitation. OS probing has its own traffic and
+timing; it is not part of the initial full port sweep. Service probes and NSE
+scripts can still be slow on unresponsive applications; the discovery controls
+do not impose a deadline on enrichment.
 
 The installed script list is captured with `--script-help` before scanning.
 Selection does not prove that every script ran: Nmap's applicability rules still

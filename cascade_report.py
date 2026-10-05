@@ -201,11 +201,11 @@ def report(directory, exit_code):
     if meta["uid"] != 0:
         limits.append("OS detection and traceroute skipped: non-root execution.")
     else:
-        limits.append("OS detection limited to hosts with open and closed TCP ports; absence of a match is unknown.")
+        limits.append("OS detection runs during targeted enrichment with at most one attempt; a missing closed TCP port can reduce reliability. Absence of a match is unknown.")
     if target_hostname(meta["target"]):
         limits.append("Only the requested hostname context was tested; Host/SNI overrides depend on script support, not all version probes.")
     if meta["min_rate"] is not None or meta["max_retries"] is not None:
-        limits.append("Explicit rate/retry overrides may reduce discovery accuracy.")
+        limits.append("Discovery rate/retry limits may miss ports on lossy or rate-limited networks; enrichment cannot recover ports missed during discovery.")
     result = {**meta, "finished": now(), "exit_code": exit_code,
               "status": "completed" if exit_code == 0 and not errors and
               all(p["status"] in ("completed", "skipped") for p in phases.values()) else "partial",
